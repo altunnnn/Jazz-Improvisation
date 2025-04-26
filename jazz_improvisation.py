@@ -520,7 +520,7 @@ if __name__ == "__main__":
     # Train the agent
     # NOTE: Training can take a significant amount of time!
     # Reduce episodes for a quick test.
-    trained_agent = train_rl_agent(episodes=3, batch_size=32) # Reduced episodes
+    trained_agent = train_rl_agent(episodes=50, batch_size=32) # Reduced episodes
 
     # Test the trained agent
     test_chord_prog = ['Am7', 'D7', 'Gmaj7', 'Cmaj7', 'F#m7b5', 'B7', 'Em7', 'A7']
