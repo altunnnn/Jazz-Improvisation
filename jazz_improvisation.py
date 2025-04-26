@@ -144,122 +144,75 @@ class JazzEnvironment:
 
     def _calculate_reward(self, bass_action):
         """
-        Calculate reward with additional factors to encourage variation and musicality.
+        Calculate the reward for the chosen bass note (action).
+        This requires musical rules.
         """
         reward = 0.0
-        bass_note_midi = bass_action + BASS_NOTE_MIN  # Convert action index back to MIDI
-        
+        bass_note_midi = bass_action + BASS_NOTE_MIN # Convert action index back to MIDI
+
         current_chord_name = self.chord_history[-1]
-        
-        # Get the last few bass notes to check for repetition
-        recent_bass_notes = [n for n in list(self.bass_note_history) if n >= 0]
-        
+        prev_bass_note_midi = self.bass_note_history[-1] if len(self.bass_note_history) > 0 else -1
+
         if not current_chord_name:
-            return 0.0  # No chord context, neutral reward
-        
+            return 0.0 # No chord context, neutral reward
+
         try:
             c = chord.Chord(current_chord_name)
             chord_pitches = c.pitches
-            chord_tone_classes = {p.pitchClass for p in chord_pitches}  # Pitch classes (0-11)
+            chord_tone_classes = {p.pitchClass for p in chord_pitches} # Pitch classes (0-11)
             root_pc = c.root().pitchClass
             bass_note_obj = note.Note(midi=bass_note_midi)
             bass_pc = bass_note_obj.pitch.pitchClass
-            
+
             # 1. Chord Tone Bonus: Is the note part of the current chord?
             if bass_pc in chord_tone_classes:
                 reward += 0.5
                 # Bonus for being the root
                 if bass_pc == root_pc:
                     reward += 0.3
-                # Bonus for being 3rd or 5th 
+                # Bonus for being 3rd or 5th
                 elif bass_pc == (root_pc + 4) % 12 or bass_pc == (root_pc + 3) % 12 or bass_pc == (root_pc + 7) % 12:
-                    reward += 0.1
-                    
-            # 2. Scale Tone Bonus: Check if note is in a scale appropriate for the chord
-            # For major chords: major scale, for minor: minor scale, for dominant: mixolydian
-            is_scale_tone = False
-            if "maj" in current_chord_name.lower():
-                # Major scale
-                major_scale_pcs = [(root_pc + i) % 12 for i in [0, 2, 4, 5, 7, 9, 11]]
-                if bass_pc in major_scale_pcs:
-                    is_scale_tone = True
-                    reward += 0.2
-            elif "m" in current_chord_name.lower() and "maj" not in current_chord_name.lower():
-                # Minor scale
-                minor_scale_pcs = [(root_pc + i) % 12 for i in [0, 2, 3, 5, 7, 8, 10]]
-                if bass_pc in minor_scale_pcs:
-                    is_scale_tone = True
-                    reward += 0.2
-            elif "7" in current_chord_name and "maj7" not in current_chord_name:
-                # Mixolydian for dominant 7 chords
-                mixolydian_pcs = [(root_pc + i) % 12 for i in [0, 2, 4, 5, 7, 9, 10]]
-                if bass_pc in mixolydian_pcs:
-                    is_scale_tone = True
-                    reward += 0.2
-                    
-            # Penalize non-chord, non-scale tones more significantly
-            if bass_pc not in chord_tone_classes and not is_scale_tone:
-                reward -= 0.4
-                    
+                     reward += 0.1
+
+            # 2. Scale Tone Bonus: Is the note part of a related scale? (e.g., Mixolydian for Dom7)
+            # (Simplified: Check if it's diatonic to a major scale of the root for major/dom, minor for minor)
+            # This is complex, let's keep it simple for now. If not a chord tone, check if dissonant.
+
             # 3. Voice Leading Reward: Smooth transition from previous note?
-            if len(recent_bass_notes) > 0:
-                prev_bass_note_midi = recent_bass_notes[-1]
-                if prev_bass_note_midi > 0:
-                    prev_bass_note_obj = note.Note(midi=prev_bass_note_midi)
-                    inter = interval.Interval(prev_bass_note_obj, bass_note_obj)
-                    
-                    # Penalize large leaps (e.g., > octave)
-                    if abs(inter.semitones) > 12:
-                        reward -= 0.3
-                    # Reward steps (major/minor 2nd)
-                    elif 1 <= abs(inter.semitones) <= 2:
-                        reward += 0.2
-                    # Small reward for consonant leaps (3rd, 4th, 5th, 6th)
-                    elif 3 <= abs(inter.semitones) <= 7:
-                        reward += 0.1
-                    # Smaller reward for larger consonant leaps
-                    elif 7 < abs(inter.semitones) <= 12:
-                        reward += 0.05
-                    
-            # 4. Dissonance Penalty: Does it clash badly?
+            if prev_bass_note_midi > 0:
+                prev_bass_note_obj = note.Note(midi=prev_bass_note_midi)
+                inter = interval.Interval(prev_bass_note_obj, bass_note_obj)
+                # Penalize large leaps (e.g., > octave)
+                if abs(inter.semitones) > 12:
+                    reward -= 0.3
+                # Reward steps (major/minor 2nd)
+                elif abs(inter.semitones) <= 2:
+                    reward += 0.2
+                # Small reward for consonant leaps (3rd, 4th, 5th, 6th)
+                elif abs(inter.semitones) <= 9:
+                    reward += 0.05
+
+            # 4. Dissonance Penalty: Does it clash badly? (e.g., minor 2nd against root/3rd/5th)
             # Check for half-step clashes with primary chord tones
             clash_penalty = 0
             for p in chord_pitches:
-                # Check against root, 3rd, 5th primarily
-                if p.pitchClass in [root_pc, (root_pc + 3) % 12, (root_pc + 4) % 12, (root_pc + 7) % 12]:
-                    diff = abs(bass_pc - p.pitchClass)
-                    if diff == 1 or diff == 11:  # Semitone clash
-                        clash_penalty = -0.6
-                        break
+                 # Check against root, 3rd, 5th primarily
+                 if p.pitchClass in [root_pc, (root_pc + 3)%12, (root_pc + 4)%12, (root_pc + 7)%12]:
+                     diff = abs(bass_pc - p.pitchClass)
+                     if diff == 1 or diff == 11: # Semitone clash
+                         clash_penalty = -0.6
+                         break
             reward += clash_penalty
-            
-            # 5. NEW: Anti-repetition reward to avoid getting stuck on one note
-            if len(recent_bass_notes) >= 3:
-                # Check if the last 3 notes were all the same
-                if recent_bass_notes[-1] == recent_bass_notes[-2] == recent_bass_notes[-3]:
-                    # Strong penalty for playing the same note 3+ times in a row
-                    reward -= 0.7
-                
-                # Check for lack of variety in a longer window
-                if len(recent_bass_notes) >= 8:
-                    unique_notes = len(set(recent_bass_notes[-8:]))
-                    if unique_notes < 3:  # Less than 3 unique notes in the last 8 notes
-                        reward -= 0.4
-                    elif unique_notes >= 4:  # Good variety
-                        reward += 0.3
-                        
-            # 6. NEW: Rhythmic placement reward
-            beat_in_measure = (self.current_step % self.beats_per_chord)
-            # Root on beat 1 is good
-            if beat_in_measure == 0 and bass_pc == root_pc:
-                reward += 0.2
-            # 5th on beat 3 is good in a walking bass pattern
-            elif beat_in_measure == 2 and bass_pc == (root_pc + 7) % 12:
-                reward += 0.1
-                
+
+            # 5. Rhythmic Placement (Simple): Bonus for root on beat 1 (needs beat tracking)
+            # beat_in_measure = (self.current_step % self.beats_per_chord) + 1
+            # if beat_in_measure == 1 and bass_pc == root_pc:
+            #    reward += 0.2
+
         except Exception as e:
-            pass  # Return default reward if chord parsing fails
-        
+            # print(f"Reward calculation error: {e}") # Avoid printing during training
+            pass # Return default reward if chord parsing fails
+
         # Normalize reward to a range, e.g., [-1, 1]
         reward = np.clip(reward, -1.0, 1.0)
         return reward
@@ -416,429 +369,93 @@ class RLJazzAgent:
         self.model.save_weights(name)
         # Potentially save epsilon value
 
-class ImprovedRLJazzAgent(RLJazzAgent):
-    """
-    Enhanced version of the RLJazzAgent with better exploration strategies
-    and architectural improvements.
-    """
-    def __init__(self, state_shapes, num_actions, learning_rate=0.001, gamma=0.95, 
-                 epsilon=1.0, epsilon_min=0.1, epsilon_decay=0.995):
-        super().__init__(state_shapes, num_actions, learning_rate, gamma, 
-                        epsilon, epsilon_min, epsilon_decay)
-        # Override the model with an improved version
-        self.model = self._build_improved_model()
-        # Temperature parameter for softmax exploration
-        self.temperature = 1.0
-        self.temperature_min = 0.2
-        self.temperature_decay = 0.995
-        
-    def _build_improved_model(self):
-        """Build an improved Q-Network model with deeper architecture."""
-        # Inputs for each part of the state
-        melody_input = keras.layers.Input(shape=self.state_shapes["melody"][1:], name="melody_input")
-        chord_input = keras.layers.Input(shape=self.state_shapes["chord"][1:], name="chord_input")
-        bass_input = keras.layers.Input(shape=self.state_shapes["bass"][1:], name="bass_input")
-        context_input = keras.layers.Input(shape=self.state_shapes["context"][1:], name="context_input")
-        
-        # Process melody with bidirectional LSTM for better sequence understanding
-        m = keras.layers.Bidirectional(keras.layers.LSTM(64, return_sequences=True))(melody_input)
-        m = keras.layers.Bidirectional(keras.layers.LSTM(32))(m)
-        m = keras.layers.LayerNormalization()(m)
-        
-        # Process chords
-        c = keras.layers.Bidirectional(keras.layers.LSTM(32, return_sequences=True))(chord_input)
-        c = keras.layers.Bidirectional(keras.layers.LSTM(16))(c)
-        c = keras.layers.LayerNormalization()(c)
-        
-        # Process bass history with attention mechanism
-        b = keras.layers.Bidirectional(keras.layers.LSTM(24, return_sequences=True))(bass_input)
-        # Simple attention mechanism
-        b_attention = keras.layers.Dense(1)(b)
-        b_attention = keras.layers.Reshape((-1,))(b_attention)
-        b_attention = keras.layers.Activation('softmax')(b_attention)
-        b_attention = keras.layers.Reshape((-1, 1))(b_attention)
-        b = keras.layers.Multiply()([b, b_attention])
-        # Replace the problematic line with Lambda layer for sum pooling
-        b = keras.layers.Lambda(lambda x: tf.reduce_sum(x, axis=1))(b)
-        b = keras.layers.LayerNormalization()(b)
-        
-        # Process context with expanded network
-        ctx = keras.layers.Dense(24, activation='relu')(context_input)
-        ctx = keras.layers.Dense(16, activation='relu')(ctx)
-        
-        # Combine features with additional layer
-        combined = keras.layers.Concatenate()([m, c, b, ctx])
-        
-        # Deeper network with residual connections
-        x = keras.layers.Dense(128, activation='relu')(combined)
-        x = keras.layers.Dropout(0.25)(x)
-        
-        # Residual block 1
-        x_res = keras.layers.Dense(128, activation='relu')(x)
-        x_res = keras.layers.Dropout(0.25)(x_res)
-        x_res = keras.layers.Dense(128, activation='relu')(x_res)
-        x = keras.layers.Add()([x, x_res])
-        x = keras.layers.LayerNormalization()(x)
-        
-        # Second dense layer
-        x = keras.layers.Dense(64, activation='relu')(x)
-        x = keras.layers.Dropout(0.2)(x)
-        
-        # Output advantage and value streams (Dueling DQN architecture)
-        advantage_stream = keras.layers.Dense(64, activation='relu')(x)
-        advantage_stream = keras.layers.Dense(self.num_actions)(advantage_stream)
-        
-        value_stream = keras.layers.Dense(64, activation='relu')(x)
-        value_stream = keras.layers.Dense(1)(value_stream)
-        
-        # Combine streams to get Q-values
-        q_values = keras.layers.Add()([
-            value_stream,
-            keras.layers.Subtract()([
-                advantage_stream,
-                keras.layers.Lambda(lambda x: keras.backend.mean(x, axis=1, keepdims=True))(advantage_stream)
-            ])
-        ])
-        
-        model = keras.Model(
-            inputs=[melody_input, chord_input, bass_input, context_input], 
-            outputs=q_values
-        )
-        model.compile(
-            loss='mse', 
-            optimizer=keras.optimizers.Adam(learning_rate=self.learning_rate)
-        )
-        print("Improved RL Model Summary:")
-        model.summary()
-        return model
-    
-    def choose_action(self, state):
-        """
-        Choose action using a combination of epsilon-greedy and softmax exploration.
-        This gives better exploration of the action space.
-        """
-        if np.random.rand() <= self.epsilon:
-            # Random exploration
-            return random.randrange(self.num_actions)
-        
-        # Get Q-values for all actions
-        q_values = self.model.predict([
-            state["melody"], state["chord"], 
-            state["bass"], state["context"]], 
-            verbose=0
-        )[0]
-        
-        # Use softmax with temperature for probabilistic selection
-        # This allows exploration proportional to the estimated values
-        if np.random.rand() <= 0.3:  # 30% chance to use softmax exploration
-            # Apply temperature scaling
-            scaled_q_values = q_values / self.temperature
-            # Softmax calculation
-            exp_q = np.exp(scaled_q_values - np.max(scaled_q_values))  # Subtract max for numerical stability
-            probabilities = exp_q / np.sum(exp_q)
-            # Sample according to probabilities
-            return np.random.choice(self.num_actions, p=probabilities)
-        
-        # Otherwise, use greedy selection
-        return np.argmax(q_values)
-    
-    def replay(self, batch_size):
-        """Enhanced replay with prioritization of diverse experiences."""
-        if len(self.memory) < batch_size:
-            return
-        
-        # Standard minibatch sampling - could be enhanced with prioritized experience replay
-        minibatch = random.sample(self.memory, batch_size)
-        
-        # Prepare batch data (more complex due to multiple inputs)
-        states_melody = np.vstack([t[0]["melody"] for t in minibatch])
-        states_chord = np.vstack([t[0]["chord"] for t in minibatch])
-        states_bass = np.vstack([t[0]["bass"] for t in minibatch])
-        states_context = np.vstack([t[0]["context"] for t in minibatch])
-        
-        next_states_melody = np.vstack([t[3]["melody"] for t in minibatch])
-        next_states_chord = np.vstack([t[3]["chord"] for t in minibatch])
-        next_states_bass = np.vstack([t[3]["bass"] for t in minibatch])
-        next_states_context = np.vstack([t[3]["context"] for t in minibatch])
-        
-        actions = np.array([t[1] for t in minibatch])
-        rewards = np.array([t[2] for t in minibatch])
-        dones = np.array([t[4] for t in minibatch])
-        
-        # Predict Q-values for next states (for target calculation)
-        next_q_values = self.model.predict([
-            next_states_melody, next_states_chord, 
-            next_states_bass, next_states_context
-        ], verbose=0)
-        
-        # Calculate target Q-values using the Bellman equation
-        targets = self.model.predict([
-            states_melody, states_chord, 
-            states_bass, states_context
-        ], verbose=0)
-        
-        for i in range(batch_size):
-            if dones[i]:
-                targets[i, actions[i]] = rewards[i]
-            else:
-                # Use double DQN strategy: select action using model, evaluate using target
-                targets[i, actions[i]] = rewards[i] + self.gamma * np.amax(next_q_values[i])
-        
-        # Train the model
-        history = self.model.fit(
-            [states_melody, states_chord, states_bass, states_context], 
-            targets, epochs=1, verbose=0, batch_size=32
-        )
-        
-        # Decay exploration parameters
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
-            
-        if self.temperature > self.temperature_min:
-            self.temperature *= self.temperature_decay
 
 # --- Training Loop Example ---
-def train_improved_agent(episodes=500, batch_size=64):
-    """Train the improved RL agent with more diverse musical patterns."""
-    # Define several chord progressions for more variety during training
-    chord_progressions = [
-        # Basic jazz progressions
-        ['Cmaj7', 'Dm7', 'G7', 'Cmaj7'] * 4,  # II-V-I in C
-        ['Dm7', 'G7', 'Cmaj7', 'Cmaj7'] * 4,  # II-V-I with extra I
-        ['Dm7', 'G7', 'Em7', 'A7', 'Dm7', 'G7', 'Cmaj7', 'Cmaj7'] * 2,  # Chain of II-V's
-        
-        # Modal progressions
-        ['Dm7', 'G7', 'Cmaj7', 'Am7', 'Dm7', 'G7', 'Em7', 'A7'] * 2,
-        
-        # Minor key progressions
-        ['Am7', 'D7', 'Gmaj7', 'Cmaj7', 'F#m7b5', 'B7', 'Em7', 'E7'] * 2,
-        
-        # Blues-based progressions
-        ['C7', 'F7', 'C7', 'C7', 'F7', 'F7', 'C7', 'C7', 'G7', 'F7', 'C7', 'G7'] * 1,
-    ]
-    
-    # Define varied melodies - using both scales and more interesting patterns
-    melody_sequences = [
-        # C major scale ascending and descending
-        [60, 62, 64, 65, 67, 69, 71, 72, 71, 69, 67, 65, 64, 62, 60] * 3,
-        
-        # Chromatic runs
-        [60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 71, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61] * 2,
-        
-        # Arpeggios
-        [60, 64, 67, 72, 67, 64, 60, 64, 67, 72, 67, 64] * 3,
-        
-        # More melodic pattern with some leaps
-        [60, 64, 62, 67, 65, 69, 67, 72, 71, 67, 65, 62, 60] * 3,
-        
-        # Minor pentatonic pattern
-        [60, 63, 65, 67, 70, 72, 70, 67, 65, 63] * 3,
-    ]
-    
-    # Create training environment with first progression/melody
-    env = JazzEnvironment(
-        chord_progression=chord_progressions[0], 
-        melody_sequence=melody_sequences[0], 
-        tempo=120
-    )
-    
-    # Initialize the improved agent
-    state_shapes = {
+def train_rl_agent(episodes=1000, batch_size=32):
+    # Define a sample chord progression and melody
+    chord_prog = ['Cmaj7', 'Fmaj7', 'Dm7', 'G7'] * 4 # Repeat progression
+    # Simple C major scale melody
+    melody = [60, 62, 64, 65, 67, 69, 71, 72] * (len(chord_prog)) # Match length roughly
+
+    env = JazzEnvironment(chord_progression=chord_prog, melody_sequence=melody, tempo=120)
+    state_shapes = { # Get shapes from an initial state
         "melody": (1, *STATE_SHAPE_MELODY),
         "chord": (1, *STATE_SHAPE_CHORD),
         "bass": (1, *STATE_SHAPE_BASS),
         "context": (1, *STATE_SHAPE_CONTEXT)
     }
-    agent = ImprovedRLJazzAgent(
-        state_shapes=state_shapes, 
-        num_actions=NUM_BASS_NOTES, 
-        epsilon=1.0,  # Start with high exploration
-        epsilon_min=0.05,  # Keep some minimal exploration
-        epsilon_decay=0.996,  # Slower decay
-        gamma=0.97,  # Slightly higher discount factor
-        learning_rate=0.001
-    )
-    
+    agent = RLJazzAgent(state_shapes=state_shapes, num_actions=NUM_BASS_NOTES)
+
     episode_rewards = []
-    running_reward = None  # For tracking progress
-    
+
     for e in range(episodes):
-        # Every N episodes, change chord progression and melody for more variety
-        if e % 20 == 0:
-            prog_idx = (e // 20) % len(chord_progressions)
-            melody_idx = (e // 20) % len(melody_sequences)
-            env = JazzEnvironment(
-                chord_progression=chord_progressions[prog_idx],
-                melody_sequence=melody_sequences[melody_idx],
-                tempo=120
-            )
-            print(f"\nSwitching to progression {prog_idx+1} and melody {melody_idx+1}")
-        
         state = env.reset()
         total_reward = 0
         done = False
         steps = 0
-        
+
         while not done and steps < env.max_steps:
             action = agent.choose_action(state)
             next_state, reward, done, _ = env.step(action)
-            
-            # Store this experience
             agent.remember(state, action, reward, next_state, done)
-            
             state = next_state
             total_reward += reward
             steps += 1
-            
-            # Train the agent
-            if len(agent.memory) >= batch_size:
-                agent.replay(batch_size)
-        
-        # Update running reward
-        if running_reward is None:
-            running_reward = total_reward
-        else:
-            running_reward = 0.05 * total_reward + 0.95 * running_reward
-        
+
+            # Train the agent if enough memory samples are available
+            agent.replay(batch_size)
+
         episode_rewards.append(total_reward)
-        
-        # Print status
-        print(f"Episode: {e+1}/{episodes}, Steps: {steps}, " + 
-              f"Reward: {total_reward:.2f}, Running Reward: {running_reward:.2f}, " +
-              f"Epsilon: {agent.epsilon:.3f}, Temp: {agent.temperature:.2f}")
-        
-        # Save periodically
-        if (e + 1) % 50 == 0 or e == episodes - 1:
-            agent.save(f"improved_jazz_agent_ep{e+1}.weights.h5")
-            
-            # Visualize progress with a test run
-            if (e + 1) % 100 == 0:
-                print("\nRunning quick test...")
-                test_rl_agent(agent, chord_progressions[-1], melody_sequences[-1], save_plot=True)
-    
-    # Plot learning curve
-    plt.figure(figsize=(12, 6))
-    plt.plot(episode_rewards, alpha=0.6, label='Episode Rewards')
-    
-    # Plot smoothed rewards
-    smoothed_rewards = []
-    window_size = 20
-    for i in range(len(episode_rewards)):
-        if i < window_size:
-            smoothed_rewards.append(sum(episode_rewards[:i+1]) / (i+1))
-        else:
-            smoothed_rewards.append(sum(episode_rewards[i-window_size+1:i+1]) / window_size)
-    plt.plot(smoothed_rewards, 'r', linewidth=2, label='Smoothed Rewards')
-    
-    plt.title('Improved RL Jazz Agent Training Progress')
+        print(f"Episode: {e+1}/{episodes}, Steps: {steps}, Total Reward: {total_reward:.2f}, Epsilon: {agent.epsilon:.2f}")
+
+        # Optionally save the model periodically
+        if (e + 1) % 50 == 0:
+            agent.save(f"rl_jazz_agent_episode_{e+1}.weights.h5")
+
+    # Plot rewards
+    plt.plot(episode_rewards)
+    plt.title('RL Agent Training Rewards')
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig("jazz_rl_training_progress.png")
     plt.show()
-    
-    return agent
+
+    return agent # Return the trained agent
 
 # --- Function to Test the Trained Agent ---
-def test_rl_agent(agent, chord_prog, melody, tempo=120, save_plot=False, filename=None):
-    """Test the trained agent and visualize results."""
-    print("\n--- Testing RL Agent ---")
+def test_rl_agent(agent, chord_prog, melody, tempo=120):
+    print("\n--- Testing Trained RL Agent ---")
     env = JazzEnvironment(chord_progression=chord_prog, melody_sequence=melody, tempo=tempo)
     state = env.reset()
     done = False
     generated_bass_line = []
     steps = 0
-    rewards = []
-    
-    # Turn off exploration for deterministic output
-    original_epsilon = agent.epsilon
-    agent.epsilon = 0.0
-    
-    chord_symbols = []  # Track chord changes
-    
+
+    agent.epsilon = 0.0 # Turn off exploration for testing
+
     while not done and steps < env.max_steps:
         action = agent.choose_action(state)
         next_state, reward, done, _ = env.step(action)
         state = next_state
         bass_note_midi = action + BASS_NOTE_MIN
         generated_bass_line.append(bass_note_midi)
-        rewards.append(reward)
-        
-        # Record current chord
-        current_chord = env.chord_history[-1]
-        chord_symbols.append(current_chord)
-        
-        # Print less frequently for longer sequences
-        if steps % 4 == 0 or steps < 10:
-            print(f"Step {steps+1}: Chord={current_chord}, " +
-                  f"Bass={bass_note_midi} ({note.Note(midi=bass_note_midi).nameWithOctave}), " +
-                  f"Reward={reward:.2f}")
-        
+        print(f"Step {steps+1}: Chord={env.chord_history[-1]}, Melody={env.melody_history[-1]}, Chosen Bass={bass_note_midi} ({note.Note(midi=bass_note_midi).nameWithOctave}), Reward={reward:.2f}")
         steps += 1
-    
-    # Restore exploration parameter
-    agent.epsilon = original_epsilon
-    
-    print(f"\nGenerated {len(generated_bass_line)} bass notes")
-    
-    # Calculate statistics
-    unique_notes = len(set(generated_bass_line))
-    total_reward = sum(rewards)
-    
-    print(f"Performance metrics:")
-    print(f"- Unique notes used: {unique_notes}")
-    print(f"- Total reward: {total_reward:.2f}")
-    print(f"- Average reward per step: {total_reward/len(rewards):.3f}")
-    
-    # Plot the generated bass line
-    plt.figure(figsize=(14, 6))
-    
-    # Plot bass line
-    plt.subplot(2, 1, 1)
-    plt.plot(generated_bass_line, 'bo-', markersize=4, linewidth=1, label='Bass Notes')
-    
-    # Add chord change markers
-    chord_changes = []
-    prev_chord = None
-    for i, chord in enumerate(chord_symbols):
-        if chord != prev_chord:
-            chord_changes.append(i)
-            plt.axvline(x=i, color='r', linestyle='--', alpha=0.3)
-            prev_chord = chord
-    
+
+    print("\nGenerated Bass Line (MIDI):", generated_bass_line)
+
+    # Play the generated bass line (requires pygame setup similar to original code)
+    play_audio_simulation(generated_bass_line, tempo)
+
+    # Visualize
+    plt.figure(figsize=(12, 4))
+    plt.plot(generated_bass_line, 'bo-', label='Generated Bass')
+    # You could overlay melody or chord changes here too
     plt.title('Bass Line Generated by RL Agent')
     plt.ylabel('MIDI Note')
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    
-    # Plot rewards
-    plt.subplot(2, 1, 2)
-    plt.plot(rewards, 'g-', label='Rewards')
-    plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
-    plt.title('Rewards per Step')
     plt.xlabel('Time Step')
-    plt.ylabel('Reward')
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    
-    plt.tight_layout()
-    
-    # Save plot if requested
-    if save_plot:
-        filename = filename or f"bass_line_test_{int(time.time())}.png"
-        plt.savefig(filename)
-    
+    plt.grid(True)
     plt.show()
-    
-    # Try to play the bass line
-    try:
-        print("\nPlaying generated bass line...")
-        play_audio_simulation(generated_bass_line, tempo)
-    except Exception as e:
-        print(f"Couldn't play audio: {e}")
-    
-    return generated_bass_line
+
 
 # --- Helper function for audio playback (adapted from original) ---
 def play_audio_simulation(bass_line, tempo):
@@ -898,21 +515,21 @@ def play_audio_simulation(bass_line, tempo):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    print("Starting Improved Reinforcement Learning Jazz Bass Generator...")
-    
-    # Train the improved agent (reduce episodes for testing)
-    trained_agent = train_improved_agent(episodes=50, batch_size=64)
-    
-    # Test the trained agent on a challenging progression
+    print("Starting Reinforcement Learning Jazz Improvisation...")
+
+    # Train the agent
+    # NOTE: Training can take a significant amount of time!
+    # Reduce episodes for a quick test.
+    trained_agent = train_rl_agent(episodes=2, batch_size=32) # Reduced episodes
+
+    # Test the trained agent
     test_chord_prog = ['Am7', 'D7', 'Gmaj7', 'Cmaj7', 'F#m7b5', 'B7', 'Em7', 'A7']
-    
-    # Create a more interesting melody
-    test_melody = []
-    for _ in range(4):  # Create a longer melody pattern
-        test_melody.extend([67, 69, 71, 72, 74, 71, 69, 67])  # Ascending/descending pattern
-        test_melody.extend([69, 71, 72, 74, 76, 74, 72, 69])  # Higher variation
-    
-    # Run the test
+    test_melody = [random.randint(60, 75) for _ in range(len(test_chord_prog) * 4)] # Random melody
     test_rl_agent(trained_agent, test_chord_prog, test_melody, tempo=140)
-    
-    print("\nRL Jazz Bass Generation Complete.")
+
+    print("\nRL Jazz Improvisation Test Complete.")
+
+    # The interactive parts from the original code would need significant
+    # rewriting to work with the RL agent/environment structure.
+    # You'd essentially run the test loop but get melody input from MIDI
+    # and update the environment state accordingly.
