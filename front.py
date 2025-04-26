@@ -593,7 +593,7 @@ class JazzBassImprovisationApp:
         preset_label.pack(side=tk.LEFT, padx=5)
         
         self.preset_combobox = ttk.Combobox(preset_frame, state="readonly", 
-                                           values=["2-5-1 in C", "Blues in F", "Autumn Leaves", "So What"])
+                                        values=["2-5-1 in C", "Blues in F", "Autumn Leaves", "So What", "Basic 2-5-1"])
         self.preset_combobox.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.preset_combobox.bind("<<ComboboxSelected>>", self.load_preset)
         
@@ -686,10 +686,11 @@ class JazzBassImprovisationApp:
         """Load a chord progression preset."""
         preset = self.preset_combobox.get()
         chord_progs = {
-            "2-5-1 in C": "Dm7, G7, Cmaj7",
+            "2-5-1 in C": "Dm7, G7, Cmaj7, Cmaj7",
             "Blues in F": "F7, Bb7, F7, C7, Bb7, F7",
             "Autumn Leaves": "Cm7, F7, Bbmaj7, Eb7, Am7b5, D7, Gm7",
-            "So What": "Dm7, Ebm7"
+            "So What": "Dm7, Ebm7",
+            "Basic 2-5-1": "Dm7, G7, Cmaj7"
         }
         if preset in chord_progs:
             self.chord_var.set(chord_progs[preset])
