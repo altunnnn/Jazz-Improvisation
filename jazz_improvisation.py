@@ -9,7 +9,9 @@ import os
 import random
 from collections import deque # For replay buffer
 import sys
-
+from midi_dataset import MidiDataset
+import logging
+import music21
 # --- Constants ---
 SEQUENCE_LENGTH = 16 # Shorter sequence for RL state might be more manageable
 BASS_NOTE_MIN = 32  # E1
@@ -21,232 +23,164 @@ STATE_SHAPE_BASS = (SEQUENCE_LENGTH, 1)     # Bass history (MIDI values)
 STATE_SHAPE_CONTEXT = (3,) # Tempo, Current Chord Root, Current Chord Type Simplified
 
 
+import numpy as np
+import music21
+import logging
+
+logger = logging.getLogger(__name__)
+
 class JazzEnvironment:
-    """
-    Simulates the musical environment for the RL agent.
-    Provides states and rewards.
-    """
-    def __init__(self, chord_progression, melody_sequence, tempo=120):
-        self.chord_progression = chord_progression # e.g., ['Cmaj7', 'Dm7', 'G7', 'Cmaj7']
-        self.melody_sequence = melody_sequence # A list of MIDI notes (can be longer than progression)
+    def __init__(self, chord_progression, melody_sequence, tempo):
+        self.chord_progression = chord_progression
+        self.melody_sequence = melody_sequence
         self.tempo = tempo
-        self.beats_per_chord = 4 # Assume 4 beats per chord for simplicity
-
+        self.max_steps = 128  # Maximum steps per episode
+        self.sequence_length = 16  # For state history
+        
+        # Constants (adjust these based on your original code)
+        self.bass_note_min = 32  # E1
+        self.bass_note_max = 60  # C4
+        self.midi_note_range = 128
+        
+        # State variables
         self.current_step = 0
-        self.current_chord_index = 0
-        self.current_melody_index = 0
-        self.max_steps = len(melody_sequence) # Or define a fixed episode length
-
-        # State components
-        self.melody_history = deque(maxlen=SEQUENCE_LENGTH)
-        self.chord_history = deque(maxlen=SEQUENCE_LENGTH) # Store chord names or simplified encodings
-        self.bass_note_history = deque(maxlen=SEQUENCE_LENGTH)
-
-        # Initialize histories with padding (e.g., zeros or rests)
-        for _ in range(SEQUENCE_LENGTH):
-            self.melody_history.append(-1) # Use -1 for rests/padding
-            self.chord_history.append(None)
-            self.bass_note_history.append(-1) # Use -1 for rests/padding
+        self.chord_history = []
+        self.melody_history = []
+        self.bass_history = []
+        
+        # Initialize state
+        self.reset()
 
     def reset(self):
-        """Reset the environment to the beginning of the sequence."""
+        """Reset the environment to the initial state."""
         self.current_step = 0
-        self.current_chord_index = 0
-        self.current_melody_index = 0
-
-        self.melody_history.clear()
-        self.chord_history.clear()
-        self.bass_note_history.clear()
-        for _ in range(SEQUENCE_LENGTH):
-            self.melody_history.append(-1)
-            self.chord_history.append(None)
-            self.bass_note_history.append(-1)
-
-        # Add the first melody note and chord
-        self._update_history()
-
-        return self._get_state()
-
-    def _update_history(self):
-        """Internal function to update state histories based on current step."""
-        # Update melody
-        current_melody_note = self.melody_sequence[self.current_melody_index] if self.current_melody_index < len(self.melody_sequence) else -1
-        self.melody_history.append(current_melody_note)
-
-        # Update chord
-        chord_idx = (self.current_step // self.beats_per_chord) % len(self.chord_progression)
-        current_chord_name = self.chord_progression[chord_idx]
-        self.chord_history.append(current_chord_name)
-
-        # Note: Bass history is updated *after* the agent takes an action in step()
+        self.chord_history = [self.chord_progression[0]] * self.sequence_length
+        self.melody_history = [self.melody_sequence[0] if self.melody_sequence else 60] * self.sequence_length
+        self.bass_history = [0] * self.sequence_length
+        
+        state = self._get_state()
+        logger.debug("Environment reset: Initial state prepared")
+        return state
 
     def _get_state(self):
-        """Compile the current state information for the agent."""
-        # --- Melody ---
-        melody_state = np.zeros(STATE_SHAPE_MELODY)
-        for i, note_val in enumerate(self.melody_history):
-            if 0 <= note_val < 128:
-                melody_state[i, note_val] = 1
-
-        # --- Chord ---
-        chord_state = np.zeros(STATE_SHAPE_CHORD)
-        for i, chord_name in enumerate(self.chord_history):
-            if chord_name:
+        """Prepare the current state for the agent."""
+        melody_state = np.zeros((self.sequence_length, self.midi_note_range))
+        for t in range(self.sequence_length):
+            if t < len(self.melody_history):
+                note = self.melody_history[t]
+                if note is not None and 0 <= note < self.midi_note_range:
+                    melody_state[t, note] = 1
+        
+        chord_state = np.zeros((self.sequence_length, 24))  # 12 pitch classes + 12 for chord types
+        for t in range(self.sequence_length):
+            if t < len(self.chord_history):
                 try:
-                    c = chord.Chord(chord_name)
-                    root = c.root().pitchClass
-                    chord_state[i, root] = 1 # One-hot encode root
-
-                    # Simplified chord type encoding (example)
-                    if c.isDominantSeventh(): type_idx = 12
-                    elif c.isMinorSeventh(): type_idx = 13
-                    elif c.isMajorSeventh(): type_idx = 14
-                    elif c.isMinorTriad(): type_idx = 15
-                    elif c.isMajorTriad(): type_idx = 16
-                    else: type_idx = 17 # Other/Unknown
-                    chord_state[i, type_idx] = 1
-                except Exception:
-                    chord_state[i, 0] = 1 # Default to C if parsing fails
-                    chord_state[i, 16] = 1 # Default to Major
-
-        # --- Bass History ---
-        # Normalize bass notes (e.g., to 0-1) or keep as MIDI values
-        bass_state = np.array(list(self.bass_note_history)).reshape(STATE_SHAPE_BASS)
-        bass_state = (bass_state - BASS_NOTE_MIN) / NUM_BASS_NOTES # Normalize 0-1
-        bass_state[bass_state < 0] = -1 # Keep rests/padding as -1
-
-
-        # --- Context ---
-        tempo_norm = self.tempo / 240.0 # Normalize tempo
-        current_chord_name = self.chord_history[-1]
-        root_norm = 0.0
-        type_norm = 0.0 # 0: Major, 0.33: Minor, 0.66: Dominant, 1: Other
-        if current_chord_name:
-            try:
-                c = chord.Chord(current_chord_name)
-                root_norm = c.root().pitchClass / 12.0
-                if c.isMajorSeventh() or c.isMajorTriad(): type_norm = 0.0
-                elif c.isMinorSeventh() or c.isMinorTriad(): type_norm = 0.33
-                elif c.isDominantSeventh(): type_norm = 0.66
-                else: type_norm = 1.0
-            except Exception: pass
-        context_state = np.array([tempo_norm, root_norm, type_norm]).reshape(STATE_SHAPE_CONTEXT)
-
-        # Return state components (can be structured as a dictionary or tuple)
-        # Using dict for clarity
+                    chord = music21.harmony.ChordSymbol(self.chord_history[t])
+                    root = chord.root().midi % 12
+                    chord_type = 0  # Simplified: 0 for major, 1 for minor, etc.
+                    if "m7" in self.chord_history[t]:
+                        chord_type = 1
+                    elif "7" in self.chord_history[t]:
+                        chord_type = 2
+                    chord_state[t, root] = 1
+                    chord_state[t, 12 + chord_type] = 1
+                except Exception as e:
+                    logger.warning(f"Invalid chord at step {self.current_step}: {self.chord_history[t]}, {e}")
+                    chord_state[t, 0] = 1  # Default to Cmaj
+        
+        bass_state = np.array(self.bass_history[-self.sequence_length:], dtype=np.float32).reshape(-1, 1)
+        bass_state = (bass_state - self.bass_note_min) / (self.bass_note_max - self.bass_note_min)
+        
+        context_state = np.array([
+            self.tempo / 240.0,  # Normalize tempo
+            (music21.harmony.ChordSymbol(self.chord_history[-1]).root().midi % 12) / 12.0 if self.chord_history else 0,
+            0  # Chord type (simplified)
+        ], dtype=np.float32)
+        
         return {
-            "melody": melody_state.reshape(1, *STATE_SHAPE_MELODY),
-            "chord": chord_state.reshape(1, *STATE_SHAPE_CHORD),
-            "bass": bass_state.reshape(1, *STATE_SHAPE_BASS),
-            "context": context_state.reshape(1, *STATE_SHAPE_CONTEXT)
+            "melody": melody_state[np.newaxis, :],
+            "chord": chord_state[np.newaxis, :],
+            "bass": bass_state[np.newaxis, :],
+            "context": context_state[np.newaxis, :]
         }
 
-
-    def _calculate_reward(self, bass_action):
-        """
-        Calculate the reward for the chosen bass note (action).
-        This requires musical rules.
-        """
-        reward = 0.0
-        bass_note_midi = bass_action + BASS_NOTE_MIN # Convert action index back to MIDI
-
-        current_chord_name = self.chord_history[-1]
-        prev_bass_note_midi = self.bass_note_history[-1] if len(self.bass_note_history) > 0 else -1
-
-        if not current_chord_name:
-            return 0.0 # No chord context, neutral reward
-
-        try:
-            c = chord.Chord(current_chord_name)
-            chord_pitches = c.pitches
-            chord_tone_classes = {p.pitchClass for p in chord_pitches} # Pitch classes (0-11)
-            root_pc = c.root().pitchClass
-            bass_note_obj = note.Note(midi=bass_note_midi)
-            bass_pc = bass_note_obj.pitch.pitchClass
-
-            # 1. Chord Tone Bonus: Is the note part of the current chord?
-            if bass_pc in chord_tone_classes:
-                reward += 0.5
-                # Bonus for being the root
-                if bass_pc == root_pc:
-                    reward += 0.3
-                # Bonus for being 3rd or 5th
-                elif bass_pc == (root_pc + 4) % 12 or bass_pc == (root_pc + 3) % 12 or bass_pc == (root_pc + 7) % 12:
-                     reward += 0.1
-
-            # 2. Scale Tone Bonus: Is the note part of a related scale? (e.g., Mixolydian for Dom7)
-            # (Simplified: Check if it's diatonic to a major scale of the root for major/dom, minor for minor)
-            # This is complex, let's keep it simple for now. If not a chord tone, check if dissonant.
-
-            # 3. Voice Leading Reward: Smooth transition from previous note?
-            if prev_bass_note_midi > 0:
-                prev_bass_note_obj = note.Note(midi=prev_bass_note_midi)
-                inter = interval.Interval(prev_bass_note_obj, bass_note_obj)
-                # Penalize large leaps (e.g., > octave)
-                if abs(inter.semitones) > 12:
-                    reward -= 0.3
-                # Reward steps (major/minor 2nd)
-                elif abs(inter.semitones) <= 2:
-                    reward += 0.2
-                # Small reward for consonant leaps (3rd, 4th, 5th, 6th)
-                elif abs(inter.semitones) <= 9:
-                    reward += 0.05
-
-            # 4. Dissonance Penalty: Does it clash badly? (e.g., minor 2nd against root/3rd/5th)
-            # Check for half-step clashes with primary chord tones
-            clash_penalty = 0
-            for p in chord_pitches:
-                 # Check against root, 3rd, 5th primarily
-                 if p.pitchClass in [root_pc, (root_pc + 3)%12, (root_pc + 4)%12, (root_pc + 7)%12]:
-                     diff = abs(bass_pc - p.pitchClass)
-                     if diff == 1 or diff == 11: # Semitone clash
-                         clash_penalty = -0.6
-                         break
-            reward += clash_penalty
-
-            # 5. Rhythmic Placement (Simple): Bonus for root on beat 1 (needs beat tracking)
-            # beat_in_measure = (self.current_step % self.beats_per_chord) + 1
-            # if beat_in_measure == 1 and bass_pc == root_pc:
-            #    reward += 0.2
-
-        except Exception as e:
-            # print(f"Reward calculation error: {e}") # Avoid printing during training
-            pass # Return default reward if chord parsing fails
-
-        # Normalize reward to a range, e.g., [-1, 1]
-        reward = np.clip(reward, -1.0, 1.0)
-        return reward
-
-
     def step(self, action):
-        """
-        Apply the agent's action, update state, calculate reward, and return results.
-        Action is the index (0 to NUM_BASS_NOTES-1).
-        """
-        if not (0 <= action < NUM_BASS_NOTES):
-            raise ValueError(f"Invalid action: {action}")
-
-        # Calculate reward based on the *current* state *before* updating history
-        reward = self._calculate_reward(action)
-
-        # Update bass note history with the chosen action (converted to MIDI)
-        bass_note_midi = action + BASS_NOTE_MIN
-        self.bass_note_history.append(bass_note_midi)
-
-        # Advance time
+        """Take a step in the environment based on the agent's action."""
         self.current_step += 1
-        self.current_melody_index += 1
-
-        # Update melody and chord histories for the *next* state
-        self._update_history()
-
-        # Check if done
-        done = self.current_step >= self.max_steps
-
-        # Get the next state
+        
+        # Convert action to MIDI note
+        bass_note = action + self.bass_note_min
+        self.bass_history.append(bass_note)
+        
+        # Update chord and melody histories
+        chord_idx = (self.current_step // 4) % len(self.chord_progression)
+        melody_idx = self.current_step % len(self.melody_sequence)
+        current_chord = self.chord_progression[chord_idx]
+        current_melody = self.melody_sequence[melody_idx] if self.melody_sequence else 60
+        
+        self.chord_history.append(current_chord)
+        self.melody_history.append(current_melody)
+        
+        # Calculate reward
+        reward = self._calculate_reward(bass_note, current_chord, current_melody)
+        
+        # Determine if episode is done
+        done = False
+        if self.current_step >= self.max_steps:
+            done = True
+            logger.debug(f"Episode done: Reached max steps ({self.max_steps})")
+        elif self.current_step >= len(self.melody_sequence):
+            done = True
+            logger.debug(f"Episode done: Reached end of melody sequence ({len(self.melody_sequence)} steps)")
+        
+        # Prepare next state
         next_state = self._get_state()
+        
+        # Additional info for debugging
+        info = {
+            "bass_note": bass_note,
+            "current_chord": current_chord,
+            "current_melody": current_melody
+        }
+        
+        logger.debug(f"Step {self.current_step}: Action={action}, Bass Note={bass_note}, Chord={current_chord}, Melody={current_melody}, Reward={reward:.2f}, Done={done}")
+        
+        return next_state, reward, done, info
 
-        return next_state, reward, done, {} # {} is placeholder for info dict
+    def _calculate_reward(self, bass_note, chord, melody_note):
+        """Calculate the reward based on the bass note, chord, and melody."""
+        reward = 0.0
+        try:
+            chord_obj = music21.harmony.ChordSymbol(chord)
+            chord_pitches = [p.midi % 12 for p in chord_obj.pitches]
+            
+            # Reward for playing a chord tone
+            bass_pitch_class = bass_note % 12
+            if bass_pitch_class in chord_pitches:
+                reward += 1.0
+                if bass_pitch_class == (chord_obj.root().midi % 12):
+                    reward += 0.5  # Extra reward for root note
+            
+            # Reward for smooth voice leading (penalize large jumps)
+            if len(self.bass_history) > 1:
+                prev_bass = self.bass_history[-2]
+                interval = abs(bass_note - prev_bass)
+                if interval <= 4:
+                    reward += 0.3
+                elif interval > 7:
+                    reward -= 0.2
+            
+            # Penalize dissonance with melody
+            melody_pitch_class = melody_note % 12
+            interval_with_melody = min(abs(bass_pitch_class - melody_pitch_class), 12 - abs(bass_pitch_class - melody_pitch_class))
+            if interval_with_melody == 1:  # Penalize semitone clashes
+                reward -= 0.5
+        
+        except Exception as e:
+            logger.warning(f"Error calculating reward: {e}")
+            reward = 0.0
+        
+        return reward
 
 
 class RLJazzAgent:
@@ -371,29 +305,60 @@ class RLJazzAgent:
 
 
 # --- Training Loop Example ---
-def train_rl_agent(episodes=1000, batch_size=32):
-    # Define a sample chord progression and melody
-    chord_prog = ['Cmaj7', 'Fmaj7', 'Dm7', 'G7'] * 4 # Repeat progression
-    # Simple C major scale melody
-    melody = [60, 62, 64, 65, 67, 69, 71, 72] * (len(chord_prog)) # Match length roughly
 
-    env = JazzEnvironment(chord_progression=chord_prog, melody_sequence=melody, tempo=120)
-    state_shapes = { # Get shapes from an initial state
+
+
+
+logger = logging.getLogger(__name__)
+
+def train_rl_agent(episodes=1000, batch_size=32, midi_dir="midi/lmd_matched"):
+    """
+    Train the RL agent using MIDI dataset for melody and chord progressions.
+    
+    Args:
+        episodes (int): Number of training episodes.
+        batch_size (int): Batch size for replay.
+        midi_dir (str): Directory containing MIDI files.
+    """
+    # Initialize dataset
+    try:
+        dataset = MidiDataset(midi_dir=midi_dir, max_files=100)
+    except ValueError as e:
+        logger.error(f"Failed to initialize dataset: {e}")
+        raise
+    
+    env = JazzEnvironment(chord_progression=['Cmaj7'], melody_sequence=[60], tempo=120)  # Placeholder
+    state_shapes = {
         "melody": (1, *STATE_SHAPE_MELODY),
         "chord": (1, *STATE_SHAPE_CHORD),
         "bass": (1, *STATE_SHAPE_BASS),
         "context": (1, *STATE_SHAPE_CONTEXT)
     }
     agent = RLJazzAgent(state_shapes=state_shapes, num_actions=NUM_BASS_NOTES)
-
+    
     episode_rewards = []
-
+    
     for e in range(episodes):
+        # Load a new melody and chord progression from dataset
+        melody, chord_prog = dataset.get_single_sequence()  # Randomly select a sequence
+        if not melody or not chord_prog:
+            logger.warning(f"Episode {e+1}: No valid data, using default.")
+            melody = [60] * 32
+            chord_prog = ['Cmaj7', 'Dm7', 'G7', 'Cmaj7'] * 2
+        
+        # Ensure melody length is sufficient
+        if len(melody) < SEQUENCE_LENGTH:
+            melody = melody * (SEQUENCE_LENGTH // len(melody) + 1)
+        melody = melody[:env.max_steps]  # Truncate to max_steps if needed
+        
+        # Initialize environment with dataset-derived data
+        env = JazzEnvironment(chord_progression=chord_prog, melody_sequence=melody, tempo=120)
+        
         state = env.reset()
         total_reward = 0
         done = False
         steps = 0
-
+        
         while not done and steps < env.max_steps:
             action = agent.choose_action(state)
             next_state, reward, done, _ = env.step(action)
@@ -401,60 +366,88 @@ def train_rl_agent(episodes=1000, batch_size=32):
             state = next_state
             total_reward += reward
             steps += 1
-
-            # Train the agent if enough memory samples are available
+            
+            # Train the agent
             agent.replay(batch_size)
-
+        
         episode_rewards.append(total_reward)
-        print(f"Episode: {e+1}/{episodes}, Steps: {steps}, Total Reward: {total_reward:.2f}, Epsilon: {agent.epsilon:.2f}")
-
-        # Optionally save the model periodically
+        logger.info(f"Episode: {e+1}/{episodes}, Steps: {steps}, Total Reward: {total_reward:.2f}, Epsilon: {agent.epsilon:.2f}")
+        
+        # Save model periodically
         if (e + 1) % 50 == 0:
             agent.save(f"rl_jazz_agent_episode_{e+1}.weights.h5")
-
+    
     # Plot rewards
+    import matplotlib.pyplot as plt
     plt.plot(episode_rewards)
     plt.title('RL Agent Training Rewards')
     plt.xlabel('Episode')
     plt.ylabel('Total Reward')
-    plt.show()
-
-    return agent # Return the trained agent
-
+    plt.savefig('training_rewards.png')
+    plt.close()
+    
+    return agent
 # --- Function to Test the Trained Agent ---
-def test_rl_agent(agent, chord_prog, melody, tempo=120):
-    print("\n--- Testing Trained RL Agent ---")
+logger = logging.getLogger(__name__)
+
+def test_rl_agent(agent, midi_dir="midi/lmd_matched", tempo=120):
+    """
+    Test the trained RL agent using a melody and chord progression from the dataset.
+    
+    Args:
+        agent: Trained RLJazzAgent instance.
+        midi_dir (str): Directory containing MIDI files.
+        tempo (int): Tempo in BPM.
+    """
+    logger.info("\n--- Testing Trained RL Agent ---")
+    
+    # Load dataset
+    try:
+        dataset = MidiDataset(midi_dir=midi_dir, max_files=100)
+    except ValueError as e:
+        logger.error(f"Failed to load dataset: {e}")
+        return
+    
+    melody, chord_prog = dataset.get_single_sequence()  # Randomly select a sequence
+    
+    if not melody or not chord_prog:
+        logger.warning("No valid data, using default.")
+        melody = [60, 62, 64, 65, 67, 69, 71, 72] * 4
+        chord_prog = ['Am7', 'D7', 'Gmaj7', 'Cmaj7'] * 2
+    
+    # Initialize environment
     env = JazzEnvironment(chord_progression=chord_prog, melody_sequence=melody, tempo=tempo)
     state = env.reset()
     done = False
     generated_bass_line = []
     steps = 0
-
-    agent.epsilon = 0.0 # Turn off exploration for testing
-
+    
+    agent.epsilon = 0.0  # Disable exploration
+    
     while not done and steps < env.max_steps:
         action = agent.choose_action(state)
         next_state, reward, done, _ = env.step(action)
         state = next_state
         bass_note_midi = action + BASS_NOTE_MIN
         generated_bass_line.append(bass_note_midi)
-        print(f"Step {steps+1}: Chord={env.chord_history[-1]}, Melody={env.melody_history[-1]}, Chosen Bass={bass_note_midi} ({note.Note(midi=bass_note_midi).nameWithOctave}), Reward={reward:.2f}")
+        logger.info(f"Step {steps+1}: Chord={env.chord_history[-1]}, Melody={env.melody_history[-1]}, Chosen Bass={bass_note_midi} ({music21.note.Note(midi=bass_note_midi).nameWithOctave}), Reward={reward:.2f}")
         steps += 1
-
-    print("\nGenerated Bass Line (MIDI):", generated_bass_line)
-
-    # Play the generated bass line (requires pygame setup similar to original code)
+    
+    logger.info("\nGenerated Bass Line (MIDI): %s", generated_bass_line)
+    
+    # Play the generated bass line
     play_audio_simulation(generated_bass_line, tempo)
-
+    
     # Visualize
+    import matplotlib.pyplot as plt
     plt.figure(figsize=(12, 4))
     plt.plot(generated_bass_line, 'bo-', label='Generated Bass')
-    # You could overlay melody or chord changes here too
     plt.title('Bass Line Generated by RL Agent')
     plt.ylabel('MIDI Note')
     plt.xlabel('Time Step')
     plt.grid(True)
-    plt.show()
+    plt.savefig('bass_line.png')
+    plt.close()
 
 
 # --- Helper function for audio playback (adapted from original) ---
@@ -515,19 +508,19 @@ def play_audio_simulation(bass_line, tempo):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    print("Starting Reinforcement Learning Jazz Improvisation...")
-
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    
+    logger.info("Starting Reinforcement Learning Jazz Improvisation...")
+    
     # Train the agent
-    # NOTE: Training can take a significant amount of time!
-    # Reduce episodes for a quick test.
-    trained_agent = train_rl_agent(episodes=2, batch_size=32) # Reduced episodes
-
+    trained_agent = train_rl_agent(episodes=2, batch_size=32, midi_dir="midi/lmd_matched")
+    
     # Test the trained agent
-    test_chord_prog = ['Am7', 'D7', 'Gmaj7', 'Cmaj7', 'F#m7b5', 'B7', 'Em7', 'A7']
-    test_melody = [random.randint(60, 75) for _ in range(len(test_chord_prog) * 4)] # Random melody
-    test_rl_agent(trained_agent, test_chord_prog, test_melody, tempo=140)
-
-    print("\nRL Jazz Improvisation Test Complete.")
+    test_rl_agent(trained_agent, midi_dir="midi/lmd_matched", tempo=140)
+    
+    logger.info("\nRL Jazz Improvisation Test Complete.")
 
     # The interactive parts from the original code would need significant
     # rewriting to work with the RL agent/environment structure.

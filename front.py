@@ -14,7 +14,8 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 import rtmidi
 import queue
-
+from midi_dataset import MidiDataset
+import music21
 # --- Constants ---
 SEQUENCE_LENGTH = 16
 BASS_NOTE_MIN = 32  # E1
@@ -423,6 +424,8 @@ class JazzBassImprovisationApp:
         self.root.title("Jazz Bass Improvisation Plugin")
         self.root.geometry("1200x800")
         self.root.configure(bg="#2D2D2D")
+
+        self.midi_dataset = MidiDataset(midi_dir="midi/lmd_matched", max_files=100)
         
         # Set dark theme colors
         self.bg_color = "#2D2D2D"
@@ -743,7 +746,6 @@ class JazzBassImprovisationApp:
             return
 
         try:
-            # Get settings
             tempo = int(self.tempo_var.get())
             chord_str = self.chord_var.get()
             mode = self.mode_combobox.get()
@@ -761,17 +763,14 @@ class JazzBassImprovisationApp:
             if not self.midi_handler.open_output(output_device):
                 raise ValueError(f"Could not open MIDI output: {output_device}")
 
-            # Clear any previous received notes
             self.received_melody_notes = []
-                
-            # Handle different modes
+
             if mode == "Responsive":
                 self.midi_handler.start_listening()
                 self.is_waiting_for_input = True
                 self.status_var.set("Waiting for MIDI input...")
                 self.log("Waiting for MIDI input. Play something on your keyboard...")
                 
-                # Start a wait thread
                 self.is_improvising = True
                 self.start_button.configure(text="Stop Improvisation")
                 self.improv_thread = threading.Thread(target=self.wait_for_input_loop, 
@@ -779,10 +778,12 @@ class JazzBassImprovisationApp:
                 self.improv_thread.daemon = True
                 self.improv_thread.start()
             else:
-                # Automatic mode - use default melody
-                melody_sequence = [60] * len(chord_progression) * 4  # Placeholder: Middle C
+                # Automatic mode - use dataset-derived melody and chords
+                melody_sequence, chord_progression = self.midi_dataset.get_single_sequence()
+                if not melody_sequence or not chord_progression:
+                    melody_sequence = [60] * len(chord_progression) * 4
+                    chord_progression = chord_progression if chord_progression else ['Cmaj7'] * 4
                 
-                # Initialize environment and start improvisation
                 self.environment = JazzEnvironment(
                     chord_progression=chord_progression,
                     melody_sequence=melody_sequence,
@@ -795,7 +796,7 @@ class JazzBassImprovisationApp:
                 self.improv_thread = threading.Thread(target=self.improv_loop)
                 self.improv_thread.daemon = True
                 self.improv_thread.start()
-                self.log("Automatic improvisation started")
+                self.log(f"Automatic improvisation started with dataset melody ({len(melody_sequence)} notes)")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start improvisation: {str(e)}")
